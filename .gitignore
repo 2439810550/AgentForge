@@ -1,0 +1,26 @@
+# 运行时状态（含本机配置快照、日志）—— 不入库
+_state/
+*.log
+
+# 本机提取的既有政策备份（含第三方工具的标记与内容）
+policy-existing-zh.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 注入产物与备份（这些是运行结果，不是源码）
+*.forge-bak
+*.unlockbak
+_forge_history/
+历史备份/
