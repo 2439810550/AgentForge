@@ -1,6 +1,6 @@
 # 自检体系
 
-`selftest.py` —— 114 项断言，**全部在临时目录里跑，不碰任何真实客户端配置**。
+`selftest.py` —— 128 项断言，**全部在临时目录里跑，不碰任何真实客户端配置**。
 
 ```bash
 python selftest.py
@@ -18,7 +18,7 @@ python selftest.py
 
 ---
 
-## 11 组，覆盖什么
+## 12 组，覆盖什么
 
 | 组 | 验证什么 | 关键断言 |
 |---|---|---|
@@ -33,6 +33,7 @@ python selftest.py
 | 9 | 靶点端到端 | dry-run / apply / 幂等 / revert，沙箱目录 |
 | 10 | 注册表 | 15 个靶点、目标表达式解析 |
 | 11 | WorkBuddy 云记忆 | 防三处已修 bug 回归 |
+| 12 | 控制台状态刷新 | 注入/还原后 detect().injected 能正确翻转；前端轮询不漏刷新 |
 
 ---
 
@@ -127,6 +128,74 @@ check("_memory_block 返回 persona_body()",
       any("persona_body()" in r for r in returns))
 check("_memory_block 不返回 persona_document()",
       not any("persona_document()" in r for r in returns))
+```
+
+## 第 12 组详解
+
+防「执行注入后状态不改变」回归。真实事故，两个独立原因：
+
+```
+[PASS] _injected_flag 检查 soul_files()
+[PASS] _injected_flag 调用 _memory_has_policy()
+[PASS] _injected_flag 按字段判云记忆（不查原始文本的 FORGE:BEGIN）
+[PASS] 注入前 detect().injected 为假
+[PASS] 注入后 detect().injected 为真（控制台状态灯依据）
+[PASS] 还原后 detect().injected 回到假
+[PASS] 二次注入后仍为真
+[PASS] SOUL.md 汇报含 s_ok 计数器
+[PASS] soul 层不再只报本次写入数
+[PASS] 存在 _wasBusy 状态变量
+[PASS] 存在 followAction（主动跟到动作结束）
+[PASS] 按忙→闲跳变刷新
+[PASS] 删掉了从未赋值的 wasBusy 死变量
+[PASS] act() 调用 followAction
+```
+
+### 测状态翻转的完整循环
+
+不只测"注入后是真"，还要测**还原后回到假**：
+
+```python
+_ins, _rows, inj_before = t.detect()
+check("注入前 detect().injected 为假", inj_before is False)
+
+t.apply(mode="apply")
+_ins, _rows, inj_after = t.detect()
+check("注入后 detect().injected 为真", inj_after is True)
+
+t.revert()
+_ins, _rows, inj_rev = t.detect()
+check("还原后 detect().injected 回到假", inj_rev is False)   # ← 关键
+```
+
+这正是用户报的第二个症状（"恢复文件之后注入状态也不改变"）。
+
+### 前端逻辑用静态检查 + node 对照实验
+
+JS 嵌在 Python 字符串里，Python 语法检查覆盖不到。两道防线：
+
+**一、静态检查关键词**（`selftest.py`）：
+
+```python
+page = _read_page_js()      # 抽出 ui.py 里 <script> 段
+check("存在 _wasBusy 状态变量", "_wasBusy" in page)
+check("按忙→闲跳变刷新", "if(_wasBusy)" in page)
+check("删掉了从未赋值的 wasBusy 死变量", "var wasBusy=false" not in page)
+```
+
+**二、node 语法检查**（开发时手动跑）：
+
+```bash
+python -c "..." > /tmp/page.js    # 抽出 JS
+node --check /tmp/page.js
+```
+
+**三、对照实验**：复刻新旧两版轮询逻辑，同场景跑，证明旧版确实不刷新 —— 这是
+"我修的到底是不是真 bug"的验证方式，比读代码可靠。
+
+```
+旧逻辑： refresh 次数: 0      ← 状态永不刷新
+新逻辑： refresh 次数: 1      ← 正常
 ```
 
 ### 静态断言：锁住"不该写的东西"

@@ -587,9 +587,33 @@ function act(action){
     $$(".tab").forEach(function(x){ if(x.dataset.t==="log") x.classList.add("on") });
     ["targets","persona","log"].forEach(function(t){
       $("#t-"+t).classList.toggle("hide", t!=="log")});
-    $("#log").innerHTML=""; ST.seq=0;
-    setTimeout(refresh,400);
+    ST.seq = 0;
+    $("#log").innerHTML = "";
+    // 主动跟到动作结束，不依赖 1500ms 的全局轮询。
+    // 旧版只 setTimeout(refresh,400) 一次 —— 如果动作在那之后才结束，
+    // 界面会停在中间态（状态灯、统计数字都不对）。
+    followAction();
   });
+}
+
+// 盯着 busy 直到结束，然后刷新状态与日志。
+// 为什么需要它：act() 提交后服务端在后台线程里跑，前端不知道何时结束。
+// 只靠全局轮询会在忙→闲的跳变上重建界面，但如果动作在两次轮询之间
+// 就跑完了（比如单靶点 apply 只需几百毫秒），跳变会被漏掉。
+function followAction(){
+  var ticks = 0;
+  var timer = setInterval(function(){
+    ticks++;
+    api("/api/busy").then(function(b){
+      if(b.busy){
+        if(ticks > 600) clearInterval(timer);   // 最多盯 5 分钟
+        return;
+      }
+      clearInterval(timer);
+      _wasBusy = false;     // 已处理过，别让全局轮询再刷一次
+      refresh();
+    }).catch(function(){});
+  }, 400);
 }
 
 $("#b-dry").onclick=function(){act("dry-run")};
@@ -642,15 +666,32 @@ $("#b-ppreview").onclick=function(){
 };
 
 /* ---------- 轮询 ---------- */
+// 关键：必须记住「上一次是否忙碌」。
+// 旧版用一个从未赋值的局部变量 wasBusy，判断写成 `d.log_seq > ST.seq`；
+// 但 pullLogs() 结尾会把 ST.seq 抬到服务端当前值 —— 动作跑完那一刻两者相等，
+// 条件恒为假 → refresh() 从不调用 → 「已注入」灯和统计数字卡在中间态。
+// 这就是「执行注入后状态不改变」的原因。改成按忙→闲跳变刷新。
+var _wasBusy = false;
 setInterval(function(){
-  api("/api/state").then(function(d){
-    var wasBusy=false;
-    api("/api/busy").then(function(b){
-      $("#busy").textContent = b.busy ? ("运行中："+b.label) : "空闲";
-      $("#busy").style.color = b.busy ? "var(--warn)" : "var(--tx3)";
-      ["#b-dry","#b-apply","#b-revert"].forEach(function(x){$(x).disabled=b.busy});
-      if(b.busy){ pullLogs(d.log_seq); }
-      else if(d.log_seq>ST.seq){ pullLogs(d.log_seq); refresh(); }
+  api("/api/busy").then(function(b){
+    $("#busy").textContent = b.busy ? ("运行中："+b.label) : "空闲";
+    $("#busy").style.color = b.busy ? "var(--warn)" : "var(--tx3)";
+    ["#b-dry","#b-apply","#b-revert"].forEach(function(x){$(x).disabled=b.busy});
+    if(b.busy){
+      _wasBusy = true;
+      api("/api/state").then(function(d){ pullLogs(d.log_seq); }).catch(function(){});
+      return;
+    }
+    if(_wasBusy){
+      // 忙 → 闲：动作刚结束，强制拉全量日志并重建界面。
+      // refresh() 内部会 pullLogs，不必重复调。
+      _wasBusy = false;
+      refresh();
+      return;
+    }
+    // 空闲且没刚跑完：仅在服务端确实有新日志时跟上（比如别处触发的动作）
+    api("/api/state").then(function(d){
+      if(d.log_seq > ST.seq){ pullLogs(d.log_seq); refresh(); }
     }).catch(function(){});
   }).catch(function(){});
 },1500);

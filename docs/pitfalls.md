@@ -264,12 +264,128 @@ def detect(self):
     return installed, st, injected
 ```
 
-而且 `_injected_flag()` 里不能只看"有没有某段文字"——别的工具（如 pojia）也会写 `最高优先级覆盖` 这类字样。要认**自己的**标记：
+而且 `_injected_flag()` 里不能只看“有没有某段文字”——别的工具（如 pojia）也会写 `最高优先级覆盖` 这类字样。要认**自己的**标记。
+
+**但更根本的教训在 #9** —— 这条判据本身后来也失配了。
+
+---
+
+## #9 判据与写入位置脱节（同一类 bug 的三个实例）
+
+**症状**：控制台里 `apply` / `revert` 之后，状态灯和统计数字不变。
+
+**根因分两层，都是“写入位置改了、读的位置没跟着改”**。
+
+### 实例一：`_injected_flag()` 认不出云记忆
+
+写入位置早就改成 `memoryBlock` **字段**，判据却在查**原始文本**：
 
 ```python
+# 错
 if t and "FORGE:SELFCHECK" in t and "FORGE:BEGIN" in t:
     return True
 ```
+
+字段是转义后的 JSON 字符串，里面的换行写成 `\n` 两个字符 ——
+`FORGE:BEGIN` 这种带换行的标记在其中**根本不出现**。所以条件恒为假，
+`detect().injected` 永远是 `False`，控制台的“已注入”灯就不亮。
+
+而且它**完全没检查 SOUL.md**（当前的主通道）。
+
+**修正**：判据按实际写入位置逐层写。
+
+```python
+def _injected_flag(self):
+    # 1) SOUL.md —— 标记块 + 自证哨兵
+    for p in self.soul_files():
+        t = self._read(p)
+        if t and marks.HTML_BEGIN in t and "FORGE:SELFCHECK" in t:
+            return True
+    # 2) 云记忆 —— 按**字段**判，不按原始文本
+    for p in self.memory_files():
+        t = self._read(p)
+        if t and self._memory_has_policy(t):
+            return True
+    # 3) 安装目录（旧版残留）
+    ...
+```
+
+### 实例二：前端轮询永远不触发刷新
+
+```javascript
+// 错：wasBusy 声明了但从未赋值；判断靠 log_seq 比大小
+var wasBusy = false;
+if (b.busy) { pullLogs(d.log_seq); }
+else if (d.log_seq > ST.seq) { pullLogs(d.log_seq); refresh(); }
+```
+
+`pullLogs()` 结尾会把 `ST.seq` 抬到服务端当前值：
+
+```javascript
+ST.seq = d.seq || seq;      // ← 就是这一行
+```
+
+于是动作跑完那一刻，`d.log_seq == ST.seq`，条件恒为假，**`refresh()` 从不调用**。
+
+**对照实验**（复刻两版逻辑，同场景跑）：
+
+```
+旧逻辑： refresh 次数: 0      ← 状态永不刷新
+新逻辑： refresh 次数: 1      ← 正常
+```
+
+**修正**：按“忙 → 闲”跳变刷新，而不是比 seq。
+
+```javascript
+var _wasBusy = false;
+if (b.busy) { _wasBusy = true; pullLogs(...); return; }
+if (_wasBusy) { _wasBusy = false; refresh(); return; }
+```
+
+另外补一个 `followAction()`：提交动作后主动轮询到结束。
+因为动作可能在两次全局轮询之间就跑完（单靶点 apply 只需几百毫秒），跳变会被漏掉。
+
+### 实例三：汇报把“已是最新”报成 0
+
+```python
+new, n = self._patch_soul(t)
+if n == 0:
+    continue          # ← 什么都不记，后面打印 "soul：0/1"
+```
+
+`n == 0` 表示“内容已是最新”，是**已注入**，不是“未处理”。
+但计数器不动，日志显示 `soul：0/1`，看着像没写。
+
+**修正**：分开记“本轮写入数”和“已就位数”。
+
+```python
+if n == 0:
+    s_ok += 1        # 已注入
+    continue
+...
+res["layers"]["soul"] = "%d/%d%s" % (s_ok, len(souls), ...)
+```
+
+---
+
+### 这个坑的通用形式
+
+**写入位置、判据、`revert`、自检、界面显示 —— 这五处必须一起改。**
+
+只改写入位置，剩下四处会集体失配。而且症状都很像：
+“操作成功了但界面没反应”。
+
+改任何写入逻辑时，逐条自查：
+
+| 问题 | 检查 |
+|---|---|
+| 写到哪里？ | 字段 / 标记块 / 顶层键？ |
+| 怎么判断“已写过”？ | 是按**那个位置**判的吗？ |
+| 怎么还原？ | `revert` 的候选列表里有它吗？ |
+| 自检怎么验？ | 用的是**产品自己的**解析方式吗？ |
+| 界面怎么显示？ | 会否把“已是最新”报成 0？ |
+
+案例：WorkBuddy 云记忆就同时踩了这五处中的四处。
 
 ---
 

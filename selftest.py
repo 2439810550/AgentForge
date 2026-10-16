@@ -548,6 +548,105 @@ def t_wb_memory():
 
 
 # ──────────────────────────────────────────────────────────────────────
+def t_console_state():
+    """控制台状态刷新 —— 防「执行注入后状态不改变」回归。
+
+    真实事故：控制台里 apply / revert 之后，状态灯和统计数字不刷新。
+    两个独立原因：
+      1. _injected_flag() 的判据与写入位置脱节
+      2. 前端轮询逻辑失效（忙→闲不触发 refresh）
+    """
+    section("12. 控制台状态刷新")
+
+    import inspect
+    from forge.t_workbuddy import WorkBuddyTarget
+
+    # ── 一、_injected_flag 必须认 SOUL.md 与云记忆字段
+    src = inspect.getsource(WorkBuddyTarget._injected_flag)
+    check("_injected_flag 检查 soul_files()", "soul_files()" in src)
+    check("_injected_flag 调用 _memory_has_policy()",
+          "_memory_has_policy(" in src)
+    check("_injected_flag 按字段判云记忆（不查原始文本的 FORGE:BEGIN）",
+          '"FORGE:BEGIN" in t' not in src)
+
+    # ── 二、注入后 detect().injected 必须为真
+    #
+    # 用一个只含 SOUL.md 的沙箱，验证 detect 能认出来。
+    import tempfile
+    import shutil
+    NL = chr(10)
+    tmp = tempfile.mkdtemp(prefix="forge-cons-")
+    try:
+        work = os.path.join(tmp, ".workbuddy")
+        os.makedirs(work)
+        soul = os.path.join(work, "SOUL.md")
+        with open(soul, "w", encoding="utf-8", newline=NL) as f:
+            f.write(NL.join(["---", 'title: "SOUL.md"', "---", "",
+                             "# SOUL.md - Who You Are", "", "原始正文。", ""]))
+
+        class A:
+            pass
+        a = A()
+        for k in ("target", "persona", "policy", "overlay", "packs",
+                  "passphrase", "signal", "full", "wb_install", "wb_data",
+                  "dir", "wb_dir"):
+            setattr(a, k, None)
+        a.wb_data = work
+        a.wb_install = os.path.join(tmp, "no-install")
+
+        t = WorkBuddyTarget(a, persona.build())
+
+        _ins, _rows, inj_before = t.detect()
+        check("注入前 detect().injected 为假", inj_before is False)
+
+        t.apply(mode="apply")
+        _ins, _rows, inj_after = t.detect()
+        check("注入后 detect().injected 为真（控制台状态灯依据）",
+              inj_after is True)
+
+        # 还原后必须回到假 —— 「恢复文件之后注入状态也不改变」的问题点
+        t.revert()
+        _ins, _rows, inj_rev = t.detect()
+        check("还原后 detect().injected 回到假", inj_rev is False)
+
+        # 二次注入仍为真（幂等）
+        t.apply(mode="apply")
+        _ins, _rows, inj2 = t.detect()
+        check("二次注入后仍为真", inj2 is True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # ── 三、apply 的层级汇报不能把"已是最新"误报成 0
+    ap = inspect.getsource(WorkBuddyTarget.apply)
+    check("SOUL.md 汇报含 s_ok 计数器", "s_ok" in ap)
+    check("soul 层不再只报本次写入数", '"%d/%d%s" % (' in ap)
+
+    # ── 四、前端轮询：忙→闲必须触发 refresh
+    page = _read_page_js()
+    check("存在 _wasBusy 状态变量", "_wasBusy" in page)
+    check("存在 followAction（主动跟到动作结束）",
+          "function followAction(" in page)
+    check("按忙→闲跳变刷新", "if(_wasBusy)" in page)
+    check("删掉了从未赋值的 wasBusy 死变量",
+          "var wasBusy=false" not in page)
+    check("act() 调用 followAction", "followAction();" in page)
+
+
+def _read_page_js():
+    """抽出 ui.py 里 <script> 段的 JS（用于静态检查）。"""
+    import os as _os
+    p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                      "forge", "ui.py")
+    t = open(p, encoding="utf-8").read()
+    i = t.find('PAGE = r"""')
+    j = t.find('"""', i + 15)
+    page = t[i + 10:j]
+    a = page.find("<script>")
+    b = page.rfind("</script>")
+    return page[a + 8:b] if a >= 0 and b > a else ""
+
+
+# ──────────────────────────────────────────────────────────────────────
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -560,7 +659,7 @@ def main():
 
     for fn in (t_markblock, t_atomic, t_readonly, t_dryrun, t_backup_strategy,
                t_toml, t_json, t_persona, t_targets_sandbox, t_registry,
-               t_wb_memory):
+               t_wb_memory, t_console_state):
         try:
             fn()
         except Exception as e:

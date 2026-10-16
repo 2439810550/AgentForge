@@ -149,7 +149,7 @@ D:\AgentForge\
 ├─ 启动.bat                  旧入口，转发到 一键启动.bat menu
 ├─ 控制台.bat                旧入口，转发到 一键启动.bat
 ├─ run.py                    等价入口（python run.py <命令>）
-├─ selftest.py               114 项自检（临时目录，不碰真实配置）
+├─ selftest.py               128 项自检（临时目录，不碰真实配置）
 ├─ policy.md                 基础政策（可改）
 ├─ overlay.md                覆盖层（可改）
 ├─ personas\
@@ -343,7 +343,7 @@ python -m forge status --target wb   # 应显示未注入
 python selftest.py
 ```
 
-114 项，全部在临时目录里跑，**不碰任何真实客户端配置**。覆盖：
+128 项，全部在临时目录里跑，**不碰任何真实客户端配置**。覆盖：
 
 | 组 | 验证什么 |
 |---|---|
@@ -358,6 +358,7 @@ python selftest.py
 | 9 | 靶点端到端：dry-run / apply / 幂等 / 还原，沙箱目录 |
 | 10 | 注册表：15 个靶点、目标表达式解析 |
 | 11 | WorkBuddy 云记忆：防三处已修 bug 回归（写入位置 / 标记嵌套 / 判据失配） |
+| 12 | 控制台状态刷新：注入/还原后状态灯能正确翻转；前端轮询不漏刷新 |
 
 详细说明见 [`docs/testing.md`](docs/testing.md)。
 

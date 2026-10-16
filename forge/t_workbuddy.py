@@ -235,25 +235,39 @@ class WorkBuddyTarget(Target):
 
     # ------------------------------------------------------------- 状态
     def _injected_flag(self):
-        """六层里任意一层带 FORGE:SELFCHECK，即算已注入。
+        """是否已被本工具注入过。
 
-        注意：模板与 product.json 的政策是**直接写进 <content_policy> 标签**的，
-        不用 FORGE:BEGIN/END 标记块 —— 位置由标签决定，再包一层标记反而多余。
-        所以判据是 FORGE:SELFCHECK 那个哨兵，不是 FORGE:BEGIN。
+        判据必须按**实际写入位置**写，共三处：
 
-        也不能只看“最高优先级覆盖” —— pojia 也写这几个字。必须认 FORGE 自己的串。
+          1. SOUL.md —— 有 HTML 标记块（FORGE:BEGIN）+ 自证哨兵
+          2. 云记忆 —— memoryBlock **字段里**有我们的政策
+             （不能查原始文本：字段是转义后的 JSON 字符串，
+              FORGE:BEGIN 这类带换行的标记在其中根本不出现）
+          3. 安装目录（旧版残留）—— 只看 FORGE:SELFCHECK
+
+        ⚠ 历史教训：本函数一度只查原始文本里的字面串，
+        写入位置改成字段后它永远返回假 —— 控制台的「已注入」灯就不亮。
+        任何判据都必须和写入位置一起改。
         """
-        for p in self.template_files():
+        # 1) SOUL.md（当前主通道）
+        for p in self.soul_files():
             t = self._read(p)
-            if t and "FORGE:SELFCHECK" in t:
+            if t and marks.HTML_BEGIN in t and "FORGE:SELFCHECK" in t:
                 return True
-        pj = self.product_json()
-        t = self._read(pj) if pj else None
-        if t and "FORGE:SELFCHECK" in t:
-            return True
+
+        # 2) 云记忆（按字段判，不按原始文本）
         for p in self.memory_files():
             t = self._read(p)
-            if t and "FORGE:SELFCHECK" in t and "FORGE:BEGIN" in t:
+            if t and self._memory_has_policy(t):
+                return True
+
+        # 3) 安装目录（旧版写过，保留识别能力）
+        #    也不能只看“最高优先级覆盖” —— pojia 也写这几个字，必须认自己的哨兵。
+        for p in list(self.template_files()) + [self.product_json()]:
+            if not p:
+                continue
+            t = self._read(p)
+            if t and "FORGE:SELFCHECK" in t:
                 return True
         return False
 
@@ -619,6 +633,7 @@ class WorkBuddyTarget(Target):
         # ---- 第 0 层：SOUL.md（用户级人格文件，写入点）----
         souls = self.soul_files()
         s_fixed = 0
+        s_ok = 0
         for p in souls:
             t = self._read(p)
             if t is None:
@@ -626,6 +641,10 @@ class WorkBuddyTarget(Target):
                 continue
             new, n = self._patch_soul(t)
             if n == 0:
+                # 已经是最新内容 —— 这是「已注入」，不是「未处理」。
+                # 旧版直接 continue，s_fixed 不增，于是打印 “soul：0/1”，
+                # 看着像没注入，实际只是本轮无需改动。
+                s_ok += 1
                 continue
             if dry:
                 s_fixed += 1
@@ -634,10 +653,13 @@ class WorkBuddyTarget(Target):
                         is_pristine=lambda x: marks.HTML_BEGIN not in x)
             if core.write_text(p, new):
                 s_fixed += 1
+                s_ok += 1
             else:
                 res["err"] += 1
         if souls:
-            res["layers"]["soul"] = "%d/%d" % (s_fixed, len(souls))
+            res["layers"]["soul"] = "%d/%d%s" % (
+                s_ok, len(souls),
+                ("（本轮写入 %d）" % s_fixed) if s_fixed and s_ok != s_fixed else "")
             res["fixed"] += s_fixed
         else:
             res["notes"].append(
