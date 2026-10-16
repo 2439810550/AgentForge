@@ -36,6 +36,8 @@ GATE_FUNCS = ["checkBashSecurityWindows", "checkPowerShellSecurity"]
 
 MEMORY_MARK = "forge-memory v"
 MEMORY_VERSION = 999999
+#: 产品只取 memoryBlock 前 10000 字符（app.asar 里 yl = 1e4），超了会被截断
+MEMORY_MAX_CHARS = 10000
 
 #: 其他工具留在云记忆里的标记 —— 合并时要整体替掉，不叠加
 FOREIGN_MEMORY_MARKS = [
@@ -366,11 +368,14 @@ class WorkBuddyTarget(Target):
                 break
             end += 1
 
-        # 看尾巴里有没有别的工具 / 我们上一轮留下的痕迹 —— 有就一并重置
+        # 尾巴里若已有覆盖层/自证（我们或别的工具的）→ 统一重置。
+        # 没有就**保持原样**：原文件那段 `IMPORTANT: Assist with...` 是产品自带的
+        # 正常文案，不是垃圾场；主动往里写反而把 product.json 撑大。
         tail = out[after:end]
         foreign = any(k in tail for k in ("不可被改写", "为什么这条", "票根规矩",
                                           "自证口令", "system_reminder",
-                                          "FORGE:SELFCHECK"))
+                                          "FORGE:SELFCHECK",
+                                          "最高优先级覆盖"))
         if not foreign:
             return out
 
@@ -468,66 +473,23 @@ class WorkBuddyTarget(Target):
             res["notes"].append("未检测到 WorkBuddy（用 --wb-install 指定安装目录）")
             return res
 
-        # ---- 第 1/4 层：模板 ----
+        # ---- 第 1/2 层：安装目录（模板 + product.json）—— 只读保护，不写 ----
+        # 这两层是产品**运行时文件**，不是用户配置文件：
+        #   · product.json 内嵌 19831 字符的 agent 主提示词（替换它会撑大文件）
+        #   · .tpl 是同一份提示词的模板副本
+        # 实测事故：把 product.json 从 389609 撑到 409718（+20109 字节）后，
+        # WorkBuddy 出现「没有 agent 信息」起不来。两次复现，因此封死。
+        #
+        # 注入改走两条安全通道（见第 0 层 SOUL.md 与第 6 层云记忆）：
+        #   · SOUL.md  —— 产品明确设计给用户写的人格文件
+        #   · 云记忆    —— memoryBlock 字段，每轮自动注入，抗升级冲掉
         tpls = self.template_files()
-        fixed = 0
-        skipped = 0
-        for p in tpls:
-            t = self._read(p)
-            if t is None:
-                res["err"] += 1
-                continue
-            new, n = self._patch_plain(t)
-            # **只动含政策块的文件**。
-            # 1342 个 .tpl 里只有二十多个带 <content_policy>，其余是图标/配置等
-            # 无关模板。对它们追加覆盖层属于过度改动 —— 会把用户的磁盘弄脏
-            # 一大片，回滚时还得逐个判断。没有政策块就不应该碰。
-            if n == 0:
-                skipped += 1
-                continue
-            if dry:
-                fixed += 1
-                continue
-            core.backup(p, suffix=self.bak_suffix, root=os.path.dirname(p))
-            if core.write_text(p, new):
-                fixed += 1
-            else:
-                res["err"] += 1
-        res["layers"]["templates"] = "%d/%d（跳过 %d 个无政策块）" % (fixed, len(tpls), skipped)
-        res["fixed"] += fixed
-
-        # ---- 第 2 层：product.json ----
+        pol = sum(1 for p in tpls
+                  if (self._read(p) or "").count("<content_policy>"))
+        res["layers"]["templates"] = "只读保护（%d 个含政策块，未改动）" % pol
         pj = self.product_json()
         if pj:
-            t = self._read(pj)
-            if t is None:
-                res["err"] += 1
-                res["notes"].append("product.json 不是 UTF-8 —— 已跳过（不重排 JSON）")
-            else:
-                new, n = self._patch_json(t)
-                if full:
-                    new, gn = self._patch_guard(new, as_json=True)
-                    res["notes"].append("文件保护中和 %d 处" % gn)
-                if n == 0:
-                    res["layers"]["product.json"] = "无政策块，跳过"
-                elif dry:
-                    res["layers"]["product.json"] = "[预演] %d 处" % n
-                    res["fixed"] += 1
-                else:
-                    # 写前先验证 JSON 仍然合法
-                    try:
-                        json.loads(new)
-                    except Exception as e:
-                        res["err"] += 1
-                        res["notes"].append("product.json 替换后 JSON 非法（%s）—— 已放弃" % e)
-                        new = None
-                    if new is not None:
-                        core.backup(pj, suffix=self.bak_suffix, root=os.path.dirname(pj))
-                        if core.write_text(pj, new):
-                            res["layers"]["product.json"] = "%d 处" % n
-                            res["fixed"] += 1
-                        else:
-                            res["err"] += 1
+            res["layers"]["product.json"] = "只读保护（未改动）"
 
         # ---- 第 3 层：命令闸门 ----
         if full:
@@ -577,6 +539,15 @@ class WorkBuddyTarget(Target):
                 failed += 1
                 continue
             blk = self._memory_block()
+
+            # 长度上限：产品只取 memoryBlock 前 10000 字符，超了会被截成半截政策。
+            if len(blk) > MEMORY_MAX_CHARS:
+                failed += 1
+                res["notes"].append(
+                    "云记忆正文 %d 字符，超过上限 %d —— 已跳过 %s"
+                    % (len(blk), MEMORY_MAX_CHARS, os.path.basename(p)))
+                continue
+
             new = self._merge_memory(t, blk)
             if new == t:
                 done += 1
@@ -584,12 +555,29 @@ class WorkBuddyTarget(Target):
             if dry:
                 done += 1
                 continue
-            core.backup(p, suffix=".bak", root=os.path.dirname(p))
+            # 备份用 .forge-bak，不覆盖 pojia 自己的 .bak（两套工具能各自还原）
+            fbak = p + self.bak_suffix
+            if not os.path.isfile(fbak) and not core.has_backup(p, suffix=self.bak_suffix):
+                core.backup(p, suffix=self.bak_suffix, root=os.path.dirname(p))
+            # 写前先解除只读（上一轮注入后设了只读，不解除会写不进去）
+            try:
+                st = os.stat(p)
+                if st.st_mode & 0o200 == 0:
+                    os.chmod(p, st.st_mode | 0o200)
+            except Exception:
+                pass
             # ⚠ 写入失败必须明确报错。
             # 早先版本此处只在成功时 done += 1，失败静默丢弃 ——
             # 结果“apply 说成功、其实一个字没写”，客户重启后还是旧人格。
             # 最常见的失败原因是客户端进程正在运行、文件被锁。
             if core.write_text(p, new):
+                # 落盘后设只读：程序回写走 tmp+rename，
+                # Windows 上覆盖只读文件会 EPERM —— 空档案的回写就被挡住了。
+                try:
+                    st = os.stat(p)
+                    os.chmod(p, st.st_mode & ~0o222)
+                except Exception:
+                    pass
                 done += 1
             else:
                 failed += 1
@@ -609,19 +597,23 @@ class WorkBuddyTarget(Target):
         return res
 
     def _memory_block(self):
-        doc = self.asm.persona_document()
-        return "\n".join([
-            "<!-- %s%d -->" % (MEMORY_MARK, MEMORY_VERSION),
-            "<!-- FORGE:BEGIN -->",
-            doc,
-            "<!-- FORGE:END -->",
-        ])
+        """云记忆注入块的**正文**（写进 memoryBlock 字段，不是文件正文）。
+
+        WorkBuddy 只把 `<uid>_memory.md` 里 **RAW_JSON 块的 `memoryBlock` 字段**
+        包成 `<memory>…</memory>` 注入系统提示词；文件其余部分（`## Memory Block`
+        之后的人读正文）根本不进提示词。
+
+        旧版把标记块追加到文件正文 —— 看着改了、实际一个字都没进模型。
+
+        ⚠ 用 persona_body() 而不是 persona_document()：后者自带 FORGE 标记，
+        嵌套会累积（这个坑踩过两次，见 _merge_memory 的注释）。
+        """
+        return self.asm.persona_body()
 
     def _merge_memory(self, text, block):
-        """把云记忆里的政策区换成我们的。
+        """把 memoryBlock 字段换成我们的正文（并清理历史残留的标记块）。
 
-        云记忆文件是客户端每轮对话都会重新拼进系统提示词的一层，
-        文件结构是：
+        云记忆文件结构：
 
             # User Memory Profile
             > Last updated: ...
@@ -629,33 +621,63 @@ class WorkBuddyTarget(Target):
 
             ## Memory Block
 
-            <正文>
+            <!-- RAW_JSON_START
+            { "uid": "...", "memoryBlock": "…真正被注入的正文…", "version": N }
+            RAW_JSON_END -->
 
-        这里有两种情况：
-
-          1. 已经有我们的标记   → 原地替换两个标记之间的内容
-          2. 是别的工具写的    → 把 `## Memory Block` 之后整段替掉
-                              （不能追加！否则两份政策并存，模型收到矛盾指令）
-          3. 空文件 / 无标注   → 追加
+        两层都要处理：
+          1. 把 `memoryBlock` 字段写成我们的正文（这才是产品读的）
+          2. 清掉文件正文里旧版残留的 FORGE 标记块（不进提示词，但是脏数据）
         """
-        begin, end = "<!-- FORGE:BEGIN -->", "<!-- FORGE:END -->"
+        import re
 
-        # 情况 1
+        # ---- 步骤 1：清掉文件正文里的历史标记块 ----
+        begin, end = marks.HTML_BEGIN, marks.HTML_END
         if begin in text:
             i = text.find(begin)
-            j = text.find(end, i)
+            j = text.rfind(end)
             if j > i:
-                return text[:i] + block + text[j + len(end):]
+                head = text[:i]
+                lines = head.split("\n")
+                while lines and (not lines[-1].strip() or MEMORY_MARK in lines[-1]):
+                    lines.pop()
+                head = "\n".join(lines)
+                tail = text[j + len(end):]
+                out = (head.rstrip() + "\n\n") if head.strip() else ""
+                out += tail.lstrip("\n")
+                text = out
 
-        # 情况 2：别人的标记 → 从 `## Memory Block` 之后整段替换
-        has_foreign = any(m in text for m in FOREIGN_MEMORY_MARKS)
-        mb = text.find("## Memory Block")
-        if has_foreign and mb >= 0:
-            head = text[:mb + len("## Memory Block")]
-            return head.rstrip() + "\n\n" + block + "\n"
-
-        # 情况 3
-        return text.rstrip() + "\n\n" + block + "\n"
+        # ---- 步骤 2：把正文写进 memoryBlock 字段 ----
+        esc = marks.json_escape_body(block)
+        ms = text.find("RAW_JSON_START")
+        if ms < 0:
+            return text
+        e = text.find("RAW_JSON_END", ms)
+        if e < 0:
+            return text
+        nl = text.find("\n", ms)
+        if nl < 0 or nl > e:
+            nl = ms
+        seg = text[nl:e]
+        km = re.search(r'"memoryBlock"\s*:\s*"', seg)
+        if not km:
+            return text
+        i = km.end()
+        j = i
+        while j < len(seg):
+            c = seg[j]
+            if c == "\\":
+                j += 2
+                continue
+            if c == '"':
+                break
+            j += 1
+        new_seg = seg[:i] + esc + seg[j:]
+        out = text[:nl] + new_seg + text[e:]
+        # 头部 `> Version:` 抬到 999999，防云端回写覆盖
+        out = re.sub(r'(^>\s*Version:\s*)\d+',
+                     lambda mm: mm.group(1) + str(MEMORY_VERSION), out, flags=re.M)
+        return out
 
     # ------------------------------------------------------------- 还原
     def revert(self, mode="apply"):

@@ -9,15 +9,32 @@
 
 ## 快速开始
 
-```bash
-cd D:\AgentForge
-python -m forge scan                # 看看装了哪些客户端
-python -m forge dry-run --target wb # 预演：只列出会改什么
-python -m forge apply --target wb   # 真打
-python -m forge revert --target wb  # 还原
+**双击 `一键启动.bat`** —— 已经跑着就直接开浏览器，没跑就后台拉起再开浏览器。
+
+同一个脚本也能当命令行用（第一个参数是子命令就直接透传）：
+
+```bat
+一键启动.bat                   :: 一键启动（默认动作）
+一键启动.bat menu              :: 交互菜单
+一键启动.bat --port 9000       :: 换端口
+一键启动.bat help              :: 用法
+一键启动.bat scan              :: 以下原样透传给 CLI
+一键启动.bat apply --target all
 ```
 
-或者双击 **`启动.bat`** 走菜单。
+不用 .bat 时全部命令等价：
+
+```bash
+cd D:\AgentForge
+python run.py scan                  # 看看装了哪些客户端
+python run.py dry-run --target wb   # 预演：只列出会改什么
+python run.py apply --target wb     # 真打
+python run.py revert --target wb    # 还原
+python run.py launch                # 一键启动（同双击 .bat）
+python run.py menu                  # 交互菜单
+```
+
+`python -m forge <命令>` 与 `python run.py <命令>` 完全等价。
 
 自检（不碰任何真实配置，全部在临时目录里跑）：
 
@@ -128,7 +145,10 @@ Codex 完全读不到，而表面上"文件改了、apply 报成功"。所以只
 
 ```
 D:\AgentForge\
-├─ 启动.bat                  交互菜单
+├─ 一键启动.bat              ← 双击这个：一键启动
+├─ 启动.bat                  旧入口，转发到 一键启动.bat menu
+├─ 控制台.bat                旧入口，转发到 一键启动.bat
+├─ run.py                    等价入口（python run.py <命令>）
 ├─ selftest.py               83 项自检（临时目录，不碰真实配置）
 ├─ policy.md                 基础政策（可改）
 ├─ overlay.md                覆盖层（可改）
@@ -143,10 +163,15 @@ D:\AgentForge\
     ├─ persona.py            装配层：政策 + 覆盖层 + 人格 + 自证 + 词包
     ├─ targets.py            靶点基类 + 11 个标记块型客户端
     ├─ t_codex.py            Codex（TOML 顶层键）
-    ├─ t_workbuddy.py        WorkBuddy（六层靶点）
+    ├─ t_workbuddy.py        WorkBuddy（SOUL.md + 云记忆两条通道）
     ├─ t_dsh.py              DSH（入口 + 技能文件）
     ├─ registry.py           注册表
-    └─ cli.py                命令行
+    ├─ cli.py                命令行
+    ├─ launch.py             ← 一键启动：探活、后台拉起、开浏览器
+    ├─ probe.py              ← 端口探活（只读，毫秒级）
+    ├─ menu.py               ← 交互菜单（纯 Python，不依赖批处理）
+    ├─ _tty.py               ← 控制台编码兼容（中文不乱码）
+    └─ ui.py                 Web 控制台
 ```
 
 ---
@@ -190,6 +215,63 @@ python -m forge apply --target wb --wb-data C:\Users\DK\.workbuddy
 
 ---
 
+## WorkBuddy：为什么只走 SOUL.md 与云记忆
+
+WorkBuddy 的提示词散在多个位置，本工具**只写其中两个用户级通道**，
+安装目录一律只读保护。这不是偷懒，是踩出来的。
+
+### 两条写入通道
+
+| 通道 | 位置 | 为何选它 |
+|---|---|---|
+| SOUL.md | `~/.workbuddy/SOUL.md` | 产品明确设计给用户写的人格文件；`parseSoulStructure()` 剥掉 frontmatter 与首个标题后，正文进提示词 |
+| 云记忆 | `~/.workbuddy/memory/<uid>_memory.md` 的 `memoryBlock` 字段 | 每轮自动注入，官方升级冲不掉 |
+
+### 三个必须知道的实现细节
+
+**1. 云记忆写的是 `memoryBlock` 字段，不是文件正文。**
+
+产品只把 RAW_JSON 块里的 `memoryBlock` 字段包成 `<memory>…</memory>` 注入；
+文件其余部分（`## Memory Block` 之后的人读正文）**根本不进提示词**。
+早期版本往正文追加标记块 —— 看着改了，模型一个字都收不到。
+
+产品的解析正则是：
+
+```js
+/<!-- RAW_JSON_START\n([\s\S]*?)\nRAW_JSON_END -->/
+```
+
+写完后本工具会用它复验一遍。
+
+**2. `localMemoryEnabled` 默认是关的。**
+
+源码里的默认值是：
+
+```js
+localMemoryEnabled: r === true    // 只有显式为 true 才开
+```
+
+`settings.json` 里没这个键 → 本地云记忆强制关闭 → 产品只从远端拉。
+本工具会把它写成 `true`（原件备份为 `settings.json.forge-bak`）。
+
+**3. 上限 10000 字符，落盘后设只读。**
+
+`memoryBlock` 超过上限会被截断成半截政策；本工具超限时**跳过并报错**，
+不写坏档案。落盘后设只读，因为程序回写走 tmp+rename，
+Windows 上覆盖只读文件会 EPERM —— 空档案的回写就被挡住了。
+
+### 为什么不碰安装目录
+
+`product.json` 里内嵌 19831 字符的 agent 主提示词，`.tpl` 是它的模板副本。
+**它们是产品运行时文件，不是用户配置。**
+
+实测事故：把 `product.json` 从 389609 字节撑到 409718（+20109）后，
+WorkBuddy 出现「没有 agent 信息」起不来。两次复现。
+
+因此 `apply` 对这两层只做一件事：数有多少个含政策块的文件，然后**一个字节都不写**。
+
+---
+
 ## 生效与验证
 
 1. 跑完 apply 后**完全退出目标客户端** —— 关窗口不够，托盘图标也要退
@@ -198,6 +280,9 @@ python -m forge apply --target wb --wb-data C:\Users\DK\.workbuddy
 4. 预期只回一行 `forge自检通过`
 
 回复带解释、加戏或拒答，说明没真正载入 —— 检查第 1 步是否退干净了。
+
+WorkBuddy 还有一项可查：日志里的 `[UserMemoryEvent] memory_injection_success`，
+`injection_size` 非 0 表示云记忆真的注进去了。
 
 ---
 

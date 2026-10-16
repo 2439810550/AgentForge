@@ -219,6 +219,22 @@ def cmd_ui(args, asm):
         host=getattr(args, "host", "127.0.0.1") or "127.0.0.1")
 
 
+def cmd_launch(args, asm):
+    """一键启动：已跑就开浏览器，没跑就后台拉起。"""
+    from . import launch
+    return launch.launch(
+        port=getattr(args, "port", None) or 8317,
+        open_browser=not getattr(args, "no_browser", False),
+        force_new=getattr(args, "new", False),
+        new_window=not getattr(args, "headless", False))
+
+
+def cmd_menu(args, asm):
+    """交互菜单（纯 Python，不依赖批处理）。"""
+    from . import menu
+    return menu.run()
+
+
 # ── 参数 ────────────────────────────────────────────────────────────────
 
 def build_parser():
@@ -263,10 +279,18 @@ def build_parser():
     sp.add_argument("--passphrase"); sp.add_argument("--signal")
     sp.add_argument("--full-text", action="store_true")
     common(sub.add_parser("packs", help="列出词包"))
-    sp = sub.add_parser("ui", help="启动 Web 控制台")
+    sp = sub.add_parser("ui", help="启动 Web 控制台（前台）")
     sp.add_argument("--port", type=int, default=8317)
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--no-browser", action="store_true")
+
+    sp = sub.add_parser("launch", help="一键启动：已跑就开浏览器，没跑就后台拉起")
+    sp.add_argument("--port", type=int, default=8317)
+    sp.add_argument("--no-browser", action="store_true", help="不开浏览器")
+    sp.add_argument("--new", action="store_true", help="忽略已在跑的实例，另起一个")
+    sp.add_argument("--headless", action="store_true", help="不留控制台窗口（纯后台）")
+
+    sub.add_parser("menu", help="交互菜单")
     return p
 
 
@@ -292,7 +316,8 @@ def main(argv=None):
     table = {
         "scan": cmd_scan, "status": cmd_status, "dry-run": cmd_dry_run,
         "apply": cmd_apply, "revert": cmd_revert, "persona": cmd_persona,
-        "packs": cmd_packs, "ui": cmd_ui,
+        "packs": cmd_packs, "ui": cmd_ui, "launch": cmd_launch,
+        "menu": cmd_menu,
     }
     fn = table.get(args.cmd)
     if not fn:
