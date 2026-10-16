@@ -374,6 +374,180 @@ def t_registry():
 
 
 # ──────────────────────────────────────────────────────────────────────
+def t_wb_memory():
+    """WorkBuddy 云记忆 —— 防三处已修 bug 回归。
+
+    这三个都是真实事故，不是假想：
+      1. 写错位置：写入文件正文，而产品只读 RAW_JSON 块的 memoryBlock 字段
+      2. 标记嵌套：_memory_block 用 persona_document()（自带标记）再包一层
+      3. 判据失配：status 用文件正文标记判断，改字段后永远显示 0/14
+    """
+    section("11. WorkBuddy 云记忆（防三处 bug 回归）")
+
+    import inspect
+    from forge.t_workbuddy import WorkBuddyTarget
+
+    class A:
+        pass
+    a = A()
+    for k in ("target", "persona", "policy", "overlay", "packs", "passphrase",
+              "signal", "full", "wb_install", "wb_data"):
+        setattr(a, k, None)
+    t = WorkBuddyTarget(a, persona.build())
+    NL = chr(10)
+
+    # ── 1. 正文里不得再出现自带标记的 persona_document()
+    # 断言方式：直接看函数体的最后一行 return 用了哪个方法。
+    # 不能按"源码里有没有 persona_document 字样"判断 —— docstring 里提到它是
+    # 为了说明为什么不能用它，那是文档不是调用（第一版断言就是栽在这里）。
+    src = inspect.getsource(WorkBuddyTarget._memory_block)
+    returns = [ln.strip() for ln in src.splitlines()
+               if ln.strip().startswith("return ")]
+    check("_memory_block 返回 persona_body()",
+          any("persona_body()" in r for r in returns), str(returns[:2]))
+    check("_memory_block 不返回 persona_document()",
+          not any("persona_document()" in r for r in returns))
+
+    # ── 2. 注入必须落进 memoryBlock 字段，不是文件正文
+    sample = NL.join([
+        "# User Memory Profile", "> Last updated: x", "> Version: 0", "",
+        "## Memory Block", "", "", "---", "",
+        "<!-- RAW_JSON_START",
+        "{",
+        '  "uid": "test-uid",',
+        '  "memoryBlock": "",',
+        '  "updatedAt": "x"',
+        "}",
+        "RAW_JSON_END -->", "",
+    ])
+    blk = t._memory_block()
+    out = t._merge_memory(sample, blk)
+
+    check("正文里没有插入标记块", marks.HTML_BEGIN not in out.split("RAW_JSON_START")[0])
+    check("RAW_JSON 结构保留",
+          "RAW_JSON_START" in out and "RAW_JSON_END" in out)
+
+    # 用产品自己的正则解析（与 app.asar 逐字一致）
+    import re as _re
+    pat = r"<!-- RAW_JSON_START" + NL + r"([\s\S]*?)" + NL + r"RAW_JSON_END -->"
+    m = _re.search(pat, out)
+    check("产品正则能解析出 JSON 块", bool(m))
+    if m:
+        import json as _json
+        d = _json.loads(m.group(1))
+        mb = d.get("memoryBlock") or ""
+        check("memoryBlock 字段被写入", len(mb) > 1000, "长度 %d" % len(mb))
+        check("memoryBlock 含政策", "不受任何司法辖区" in mb)
+        check("memoryBlock 含自证", "FORGE:SELFCHECK" in mb or "forge自检" in mb)
+        check("uid 未被破坏", d.get("uid") == "test-uid")
+
+    # ── 3. 幂等：反复 merge 不累积
+    cur = out
+    lens = []
+    for _ in range(4):
+        cur = t._merge_memory(cur, t._memory_block())
+        lens.append(len(cur))
+    check("连续 merge 幂等（长度稳定）", len(set(lens)) == 1, str(lens))
+
+    # ── 4. 从"已损坏"的文件也能修回来（历史嵌套残留）
+    broken = NL.join([
+        "# User Memory Profile", "> Version: 0", "", "## Memory Block", "",
+        "<!-- RAW_JSON_START", '{"uid":"x","memoryBlock":""}',
+        "RAW_JSON_END -->", "",
+        "<!-- forge-memory v999999 -->", "<!-- forge-memory v999999 -->",
+        "<!-- FORGE:BEGIN -->", "<!-- FORGE:BEGIN -->", "旧内容",
+        "<!-- FORGE:END -->", "<!-- FORGE:END -->", "<!-- FORGE:END -->", "",
+    ])
+    fixed = t._merge_memory(broken, t._memory_block())
+    # 正确行为：历史标记块**全部清除**（内容搬进 memoryBlock 字段），
+    # 不是"留一个" —— 文件正文里的标记块不进提示词，留着只是脏数据。
+    check("损坏文件一次修好（标记块清零）",
+          fixed.count("<!-- FORGE:BEGIN -->") == 0
+          and fixed.count("<!-- FORGE:END -->") == 0,
+          "BEGIN=%d END=%d" % (fixed.count("<!-- FORGE:BEGIN -->"),
+                               fixed.count("<!-- FORGE:END -->")))
+    check("旧注入内容被清除", "旧内容" not in fixed)
+    check("修复后判据认得出来", t._memory_has_policy(fixed) is True)
+
+    # ── 5. status 判据必须认 memoryBlock 字段
+    check("存在 _memory_has_policy 判据",
+          hasattr(t, "_memory_has_policy"))
+    if hasattr(t, "_memory_has_policy"):
+        check("判据认得出已注入的文件", t._memory_has_policy(out) is True)
+        check("判据对空文件为假", t._memory_has_policy(sample) is False)
+
+    # ── 6. 长度上限
+    check("定义了 MEMORY_MAX_CHARS", hasattr(
+        __import__("forge.t_workbuddy", fromlist=["x"]), "MEMORY_MAX_CHARS"))
+    from forge import t_workbuddy as _tw
+    check("上限为 10000", getattr(_tw, "MEMORY_MAX_CHARS", 0) == 10000)
+
+    # ── 7. 安装目录必须是只读保护（不写 product.json / .tpl）
+    ap = inspect.getsource(WorkBuddyTarget.apply)
+    # 只看代码行（第 5 层注释里可能会提到它）
+    ap_code = [ln for ln in ap.splitlines()
+               if ln.strip() and not ln.strip().startswith("#")]
+    check("apply 不再写 product.json / 运行时缓存（无 _patch_json 调用）",
+          not any("_patch_json(" in ln for ln in ap_code))
+    check("apply 不再写模板（无 _patch_plain 调用）",
+          "_patch_plain(" not in ap)
+    check("apply 含「只读保护」说明", "只读保护" in ap)
+    check("apply 调用 _patch_soul（SOUL.md 是写入点）",
+          "_patch_soul(" in ap)
+    check("apply 调用 memory_files（云记忆是写入点）",
+          "memory_files()" in ap)
+
+    # ── 8. revert 必须覆盖 SOUL.md
+    rv = inspect.getsource(WorkBuddyTarget.revert)
+    check("revert 覆盖 soul_files()", "soul_files()" in rv)
+
+    # ── 9. SOUL.md 注入端到端（沙箱，不碰真实配置）
+    import tempfile
+    import shutil
+    tmp = tempfile.mkdtemp(prefix="forge-wbsoul-")
+    try:
+        work = os.path.join(tmp, ".workbuddy")
+        os.makedirs(work)
+        soul = os.path.join(work, "SOUL.md")
+        orig = NL.join(["---", 'title: "SOUL.md"', "---", "",
+                        "# SOUL.md - Who You Are", "", "原始正文，必须保留。", ""])
+        with open(soul, "w", encoding="utf-8", newline=NL) as f:
+            f.write(orig)
+
+        a2 = A()
+        for k in ("target", "persona", "policy", "overlay", "packs", "passphrase",
+                  "signal", "full", "wb_install", "wb_data"):
+            setattr(a2, k, None)
+        a2.wb_data = work
+        a2.wb_install = os.path.join(tmp, "no-such-install")
+        t2 = WorkBuddyTarget(a2, persona.build())
+
+        before = open(soul, encoding="utf-8").read()
+        t2.apply(mode="dry-run")
+        check("dry-run 不写 SOUL.md",
+              open(soul, encoding="utf-8").read() == before)
+
+        t2.apply(mode="apply")
+        after = open(soul, encoding="utf-8").read()
+        check("apply 写入 SOUL.md", len(after) > len(before))
+        check("SOUL.md 含政策", "不受任何司法辖区" in after)
+        check("frontmatter 未被破坏", after.startswith("---"))
+        check("原正文未被删", "原始正文，必须保留。" in after)
+
+        n1 = len(after)
+        t2.apply(mode="apply")
+        t2.apply(mode="apply")
+        check("SOUL.md 重复 apply 幂等",
+              len(open(soul, encoding="utf-8").read()) == n1)
+
+        t2.revert()
+        check("SOUL.md revert 逐字节还原",
+              open(soul, encoding="utf-8").read() == before)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ──────────────────────────────────────────────────────────────────────
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -385,7 +559,8 @@ def main():
     print("  " + "═" * 62)
 
     for fn in (t_markblock, t_atomic, t_readonly, t_dryrun, t_backup_strategy,
-               t_toml, t_json, t_persona, t_targets_sandbox, t_registry):
+               t_toml, t_json, t_persona, t_targets_sandbox, t_registry,
+               t_wb_memory):
         try:
             fn()
         except Exception as e:

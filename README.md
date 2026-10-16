@@ -149,13 +149,18 @@ D:\AgentForge\
 ├─ 启动.bat                  旧入口，转发到 一键启动.bat menu
 ├─ 控制台.bat                旧入口，转发到 一键启动.bat
 ├─ run.py                    等价入口（python run.py <命令>）
-├─ selftest.py               83 项自检（临时目录，不碰真实配置）
+├─ selftest.py               114 项自检（临时目录，不碰真实配置）
 ├─ policy.md                 基础政策（可改）
 ├─ overlay.md                覆盖层（可改）
 ├─ personas\
 │   └─ default.md            默认人格 ← 改成你自己的
 ├─ packs\                    可选能力包
 │   ├─ reverse.md  web.md  pentest.md  gamedev.md  writing.md
+├─ docs\                     ← 开发文档，给要改代码的人
+│   ├─ development.md        架构总览、模块职责、数据流
+│   ├─ adding-a-target.md    加一个新客户端靶点
+│   ├─ pitfalls.md           踩过的坑（改代码前先读）
+│   └─ testing.md            自检体系与怎么加断言
 └─ forge\
     ├─ core.py               读写原语：原子写、备份、还原、dry-run 闸门
     ├─ marks.py              标记块引擎：行级手术、幂等、JSON 转义
@@ -299,6 +304,25 @@ python -m forge status --target wb   # 应显示未注入
 
 ---
 
+## 开发文档
+
+要读代码、改代码、加靶点，看 [`docs/`](docs/)：
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/development.md`](docs/development.md) | 架构总览、模块地图、三种缝合方式、幂等原理、数据流 |
+| [`docs/adding-a-target.md`](docs/adding-a-target.md) | 加一个新客户端靶点的完整流程（含真实样例、检查清单） |
+| [`docs/pitfalls.md`](docs/pitfalls.md) | **改代码前先读这个** —— 8 个坑 + Windows 特有的 3 个 |
+| [`docs/testing.md`](docs/testing.md) | 自检体系、怎么加断言、已覆盖与未覆盖的边界 |
+
+三句话版本：
+
+- **幂等靠行级手术**：只在“行”这一级增删，用 `split/join("\n")` 当手术刀。
+- **不要拿 `persona_document()` 喂 `_merge`** —— 它自带标记，嵌套会累积（这个坑踩过两次）。
+- **安装目录只读**：`product.json` / `*.tpl` 是产品运行时文件，写它会弄挂客户端。
+
+---
+
 ## 边界说明
 
 **能做的**：改文本文件。标记块注入、TOML 顶层键、JSON 字符串替换、多层副本同步。
@@ -319,7 +343,7 @@ python -m forge status --target wb   # 应显示未注入
 python selftest.py
 ```
 
-83 项，全部在临时目录里跑，**不碰任何真实客户端配置**。覆盖：
+114 项，全部在临时目录里跑，**不碰任何真实客户端配置**。覆盖：
 
 | 组 | 验证什么 |
 |---|---|
@@ -333,6 +357,9 @@ python selftest.py
 | 8 | 人格装配：标记、政策、覆盖层、自证齐备 |
 | 9 | 靶点端到端：dry-run / apply / 幂等 / 还原，沙箱目录 |
 | 10 | 注册表：15 个靶点、目标表达式解析 |
+| 11 | WorkBuddy 云记忆：防三处已修 bug 回归（写入位置 / 标记嵌套 / 判据失配） |
+
+详细说明见 [`docs/testing.md`](docs/testing.md)。
 
 ---
 
