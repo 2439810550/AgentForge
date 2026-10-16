@@ -770,6 +770,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            # 必须禁缓存：整个界面（含全部 JS）就靠这一个响应下发。
+            # 不设的话浏览器会拿旧页面，于是改了前端逻辑但用户看到的还是旧的 ——
+            # 实测症状：修复已部署、服务端发的页面含新逻辑，
+            # 但浏览器里跑的还是旧 JS，多选还原仍然只刷新第一次。
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
             self.end_headers()
             self.wfile.write(body)
         except Exception:

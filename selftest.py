@@ -630,6 +630,23 @@ def t_console_state():
     check("删掉了从未赋值的 wasBusy 死变量",
           "var wasBusy=false" not in page)
     check("act() 调用 followAction", "followAction();" in page)
+    # 旧的一次性定时刷新必须彻底清掉 —— 多选还原要 1.5~2.4 秒，
+    # 400ms 时一个都还没完成 → 界面停在中间态（用户看到的就是“只还原了第一个”）。
+    # 只看**代码行**：注释里提到这个写法是为了说明为什么废弃它。
+    page_code = [ln for ln in page.splitlines()
+                 if ln.strip() and not ln.strip().startswith("//")]
+    check("不再用一次性 setTimeout(refresh,400)",
+          not any("setTimeout(refresh,400)" in ln for ln in page_code))
+
+    # ── 五、页面响应必须禁缓存
+    # 整个界面（含全部 JS）就靠 GET / 这一个响应下发。不设 Cache-Control
+    # 时浏览器拿旧页面，于是“服务端已是新代码、用户跑的却是旧 JS”。
+    import re as _re
+    ui_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "forge", "ui.py"), encoding="utf-8").read()
+    html_fn = ui_src[ui_src.find("def _html("):ui_src.find("def _read_body")]
+    check("_html 下发 Cache-Control", "Cache-Control" in html_fn)
+    check("_html 用 no-store", "no-store" in html_fn)
 
 
 def _read_page_js():
