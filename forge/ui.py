@@ -141,6 +141,15 @@ def run_action(payload):
     action = payload.get("action")
     targets = payload.get("targets") or []
     full = bool(payload.get("full"))
+
+    # 空选不得静默变成 all。
+    # 前端有 `if(!ts.length) toast(...)` 拦着，但 API 层没拦 —— 旧代码里
+    # `targets: []` 会被 registry.resolve 展开成全部 15 个靶点。
+    # 直接调 API（或前端出 bug）时会误伤全部客户端，revert 场景下尤其危险。
+    if not targets:
+        S.log("[!] 未指定目标 —— 已拒绝（空选不会变成 all）")
+        return
+
     asm = build_assembly(payload)
 
     with S.lock:
@@ -153,6 +162,11 @@ def run_action(payload):
         keys_, bad = registry.resolve(",".join(targets) if targets else "all")
         if bad:
             S.log("[!] 未知目标：%s" % ", ".join(bad))
+        # 全部目标都无效时直接收工，不能报“完成”并提示重启客户端 ——
+        # 那会让人以为真打了，实际一个字节都没动。
+        if not keys_:
+            S.log("[!] 没有可处理的目标 —— 未执行任何写入")
+            return
 
         dry = (action == "dry-run")
         if dry:
@@ -842,6 +856,11 @@ class Handler(BaseHTTPRequestHandler):
             act = req.get("action")
             if act not in ("apply", "revert", "dry-run"):
                 return self._json({"ok": False, "err": "未知动作：%s" % act})
+            # 在边界就把空拦截掉，给前端一个明确的错误响应，
+            # 而不是让它在后台变成一个“静默什么都不做”的空转。
+            tgs = req.get("targets") or []
+            if not tgs:
+                return self._json({"ok": False, "err": "未选任何客户端"})
             t = threading.Thread(target=run_action, args=(req,), daemon=True,
                                  name="forge-action")
             t.start()

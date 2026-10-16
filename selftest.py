@@ -648,6 +648,17 @@ def t_console_state():
     check("_html 下发 Cache-Control", "Cache-Control" in html_fn)
     check("_html 用 no-store", "no-store" in html_fn)
 
+    # ── 六、空选不得静默变成 all
+    # registry.resolve("") 会返回全部靶点。前端有 if(!ts.length) 拦着，
+    # 但 API 层旧代码没拦 —— 直接调 API 时会误伤全部客户端。
+    i_act = ui_src.find('if path == "/api/action"')
+    j_act = ui_src.find("if path ==", i_act + 10)      # 下一段
+    act_fn = ui_src[i_act:j_act if j_act > 0 else i_act + 2000]
+    check("API 拒绝空 targets", "未选任何客户端" in act_fn)
+    run_fn = ui_src[ui_src.find("def run_action("):]
+    run_fn = run_fn[:run_fn.find("def collect_state")]
+    check("run_action 也有空选兼底", "未指定目标" in run_fn)
+
 
 def _read_page_js():
     """抽出 ui.py 里 <script> 段的 JS（用于静态检查）。"""
